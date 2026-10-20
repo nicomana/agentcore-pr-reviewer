@@ -1,0 +1,47 @@
+# Copy this workflow into any repo that should get AI reviews.
+# Needs repo/org variables AGENTCORE_RUNTIME_ARN and AGENTCORE_INVOKER_ROLE_ARN (see README).
+name: AI PR review
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number to review
+        required: true
+
+permissions:
+  id-token: write # OIDC federation into AWS
+  contents: read
+
+concurrency:
+  group: ai-pr-review-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: vars.AGENTCORE_RUNTIME_ARN != '' && (github.event_name == 'workflow_dispatch' || !github.event.pull_request.draft)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AGENTCORE_INVOKER_ROLE_ARN }}
+          aws-region: ${{ vars.AGENTCORE_REGION || 'us-east-1' }}
+
+      - name: Invoke reviewer agent
+        env:
+          RUNTIME_ARN: ${{ vars.AGENTCORE_RUNTIME_ARN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+        run: |
+          jq -n --arg repo "$REPO" --argjson pr "$PR_NUMBER" '{repo: $repo, pr_number: $pr}' > payload.json
+          aws bedrock-agentcore invoke-agent-runtime \
+            --agent-runtime-arn "$RUNTIME_ARN" \
+            --runtime-session-id "pr-review-$(cat /proc/sys/kernel/random/uuid)" \
+            --content-type application/json \
+            --payload fileb://payload.json \
+            --cli-read-timeout 900 \
+            response.json
+          jq -r '"Review posted: \(.review_url)\nInline comments: \(.comments | length)"' response.json

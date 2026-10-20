@@ -1,0 +1,61 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: IAM role GitHub Actions assumes (OIDC) to invoke the PR reviewer AgentCore runtime.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Description: GitHub org or user that owns the repos allowed to invoke the reviewer.
+  RepoPattern:
+    Type: String
+    Default: "*"
+    Description: Repo name or wildcard pattern within the org.
+  AgentRuntimeArn:
+    Type: String
+    Description: ARN of the deployed reviewer runtime (from `agentcore status`).
+  CreateOIDCProvider:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: Set to false if the account already has the GitHub OIDC provider.
+
+Conditions:
+  CreateProvider: !Equals [!Ref CreateOIDCProvider, "true"]
+
+Resources:
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+
+  InvokerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: github-agentcore-pr-reviewer-invoker
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${RepoPattern}:*
+      Policies:
+        - PolicyName: invoke-pr-reviewer
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: bedrock-agentcore:InvokeAgentRuntime
+                Resource:
+                  - !Ref AgentRuntimeArn
+                  - !Sub ${AgentRuntimeArn}/*
+
+Outputs:
+  InvokerRoleArn:
+    Value: !GetAtt InvokerRole.Arn

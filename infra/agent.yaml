@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: PR reviewer agent on Bedrock AgentCore Runtime. Deploy with scripts/deploy.sh.
+
+Parameters:
+  CodeBucket:
+    Type: String
+    Description: S3 bucket holding the agent code zip.
+  CodeKey:
+    Type: String
+    Description: S3 key of the agent code zip (built by scripts/deploy.sh).
+  RuntimeName:
+    Type: String
+    Default: pr_reviewer
+    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9_]{0,47}$"
+  ModelId:
+    Type: String
+    Default: us.anthropic.claude-opus-5-5
+    Description: Bedrock model or inference profile ID.
+  GitHubCredentialName:
+    Type: String
+    Default: github
+    Description: AgentCore Identity API key credential provider name for the GitHub token.
+
+Resources:
+  # Set the real token after the first deploy:
+  #   aws secretsmanager put-secret-value --secret-id <GitHubTokenSecretArn> --secret-string '{"token":"github_pat_..."}'
+  GitHubTokenSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${AWS::StackName}/github-token
+      Description: GitHub token used by the PR reviewer agent (JSON key "token").
+      SecretString: '{"token":"REPLACE_ME"}'
+
+  GitHubCredential:
+    Type: AWS::BedrockAgentCore::ApiKeyCredentialProvider
+    Properties:
+      Name: !Ref GitHubCredentialName
+      ApiKeySecretSource: EXTERNAL
+      ApiKeySecretConfig:
+        SecretId: !Ref GitHubTokenSecret
+        JsonKey: token
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: AgentCore Runtime execution role for the PR reviewer
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: runtime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: InvokeModels
+                Effect: Allow
+                Action:
+                  - bedrock:CountTokens
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/*
+                  - !Sub arn:${AWS::Partition}:bedrock:*::foundation-model/*
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*
+              - Sid: Telemetry
+                Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                  - xray:PutTelemetryRecords
+                  - xray:PutTraceSegments
+                Resource: "*"
+              - Sid: Identity
+                Effect: Allow
+                Action:
+                  - bedrock-agentcore:CreateWorkloadIdentity
+                  - bedrock-agentcore:GetResourceApiKey
+                  - bedrock-agentcore:GetWorkloadAccessTokenForUserId
+                Resource:
+                  - !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:token-vault/*
+                  - !Sub arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:workload-identity-directory/*
+              - Sid: GitHubTokenSecret
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref GitHubTokenSecret
+
+  Runtime:
+    Type: AWS::BedrockAgentCore::Runtime
+    DependsOn: GitHubCredential # Ref on the provider returns its ARN; the runtime needs the name
+    Properties:
+      AgentRuntimeName: !Ref RuntimeName
+      Description: Peer-reviews GitHub pull requests and posts inline review comments
+      RoleArn: !GetAtt ExecutionRole.Arn
+      NetworkConfiguration:
+        NetworkMode: PUBLIC
+      AgentRuntimeArtifact:
+        CodeConfiguration:
+          Runtime: PYTHON_3_14
+          EntryPoint: [opentelemetry-instrument, main.py]
+          Code:
+            S3:
+              Bucket: !Ref CodeBucket
+              Prefix: !Ref CodeKey
+      EnvironmentVariables:
+        MODEL_ID: !Ref ModelId
+        GITHUB_CREDENTIAL_NAME: !Ref GitHubCredentialName
+
+Outputs:
+  RuntimeArn:
+    Value: !GetAtt Runtime.AgentRuntimeArn
+  RuntimeId:
+    Value: !GetAtt Runtime.AgentRuntimeId
+  ExecutionRoleArn:
+    Value: !GetAtt ExecutionRole.Arn
+  GitHubTokenSecretArn:
+    Value: !Ref GitHubTokenSecret
