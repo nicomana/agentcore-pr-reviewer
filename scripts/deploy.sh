@@ -1,21 +1,37 @@
 #!/usr/bin/env bash
-# Build the agent code zip, upload it to S3 and deploy infra/agent.yaml.
-#   AWS_PROFILE=<your-profile> scripts/deploy.sh
-# Env: STACK_NAME (default pr-reviewer), AWS_REGION (default profile region or us-east-1),
-#      ARTIFACT_BUCKET (default pr-reviewer-artifacts-<account>-<region>, created if missing).
+# Build the agent code zip, upload it to S3 and deploy infra/agent.yaml with configs/<env>.yaml.
+#   AWS_PROFILE=<your-profile> scripts/deploy.sh sandbox
+# Config keys: StackName (default pr-reviewer), Region (default us-east-1),
+#   ArtifactBucket (default pr-reviewer-artifacts-<account>-<region>, created if missing),
+#   Parameters (stack parameters), Tags (stack tags). Strings support $ENV_VARS.
+# DRY_RUN=1 uploads the code and creates the change set without executing it.
+# Requires: aws, uv, yq (mikefarah, v4), zip.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 APP="$ROOT/app/reviewer"
 BUILD="$ROOT/build"
-STACK_NAME=${STACK_NAME:-pr-reviewer}
-REGION=${AWS_REGION:-$(aws configure get region || true)}
-REGION=${REGION:-us-east-1}
-ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-BUCKET=${ARTIFACT_BUCKET:-pr-reviewer-artifacts-$ACCOUNT-$REGION}
-export AWS_REGION=$REGION
+ENV_NAME=${1:?usage: scripts/deploy.sh <env>  (reads configs/<env>.yaml)}
+CONFIG="$ROOT/configs/$ENV_NAME.yaml"
+[ -f "$CONFIG" ] || { echo "Config not found: $CONFIG" >&2; exit 1; }
 
-if ! aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+# Read a value from the config with environment variables substituted into every string.
+cfg() { yq "(.. | select(tag == \"!!str\")) |= envsubst | $1" "$CONFIG"; }
+# Print one Key=Value line per entry of a config map.
+cfg_pairs() { cfg "$1 // {} | to_entries | .[] | .key + \"=\" + (.value | tostring)"; }
+
+STACK_NAME=$(cfg '.StackName // "pr-reviewer"')
+REGION=$(cfg '.Region // "us-east-1"')
+export AWS_REGION=$REGION
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+BUCKET=$(cfg ".ArtifactBucket // \"pr-reviewer-artifacts-$ACCOUNT-$REGION\"")
+
+PARAMS=() TAGS=()
+while IFS= read -r line; do [ -n "$line" ] && PARAMS+=("$line"); done < <(cfg_pairs .Parameters)
+while IFS= read -r line; do [ -n "$line" ] && TAGS+=("$line"); done < <(cfg_pairs .Tags)
+echo "Deploying $STACK_NAME to $ACCOUNT/$REGION with configs/$ENV_NAME.yaml"
+
+if ! aws s3api head-bucket --bucket "$BUCKET" >/dev/null 2>&1; then
   echo "Creating artifact bucket $BUCKET"
   if [ "$REGION" = us-east-1 ]; then
     aws s3api create-bucket --bucket "$BUCKET" >/dev/null
@@ -50,7 +66,9 @@ aws cloudformation deploy \
   --template-file "$ROOT/infra/agent.yaml" \
   --capabilities CAPABILITY_IAM \
   --no-fail-on-empty-changeset \
-  --parameter-overrides CodeBucket="$BUCKET" CodeKey="$KEY"
+  ${DRY_RUN:+--no-execute-changeset} \
+  --parameter-overrides CodeBucket="$BUCKET" CodeKey="$KEY" ${PARAMS[@]+"${PARAMS[@]}"} \
+  ${TAGS[@]+--tags "${TAGS[@]}"}
 
 aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
   --query 'Stacks[0].Outputs[].[OutputKey,OutputValue]' --output table

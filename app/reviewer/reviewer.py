@@ -7,10 +7,10 @@ from strands import Agent, tool
 
 from diff import annotate_patch, commentable_lines
 from github_client import GitHubClient, PullRequest
-from model.load import load_model
+from model.load import load_model, load_retry_strategy
 from prompts import SYSTEM_PROMPT, review_prompt
+from settings import SETTINGS
 
-MAX_FILE_LINES = 800
 REVIEW_MARKER = "<!-- agentcore-pr-review -->"
 
 
@@ -35,7 +35,7 @@ def build_tools(gh: GitHubClient, pr: PullRequest, review: Review) -> list:
             f"Title: {pr.title}",
             f"Author: {pr.author}",
             f"Branches: {pr.head_ref} -> {pr.base_ref}",
-            f"Description:\n{pr.body[:6000] or '(none)'}",
+            f"Description:\n{pr.body[: SETTINGS.max_description_chars] or '(none)'}",
             "",
             f"Changed files ({len(pr.files)}):",
         ]
@@ -62,19 +62,19 @@ def build_tools(gh: GitHubClient, pr: PullRequest, review: Review) -> list:
     @tool
     def read_file(path: str, start_line: int = 1, end_line: int | None = None) -> str:
         """Read a file from the PR head commit, with line numbers. Use it for context
-        around a change. Returns at most 800 lines per call.
+        around a change. Long files are returned in chunks; ask for the next range.
 
         Args:
             path: Repository-relative file path.
             start_line: First line to return (1-based).
-            end_line: Last line to return (inclusive). Defaults to start_line + 799.
+            end_line: Last line to return (inclusive). Defaults to the largest allowed chunk.
         """
         content = gh.get_file(path, pr.head_sha)
         if content is None:
             return f"{path} not found at {pr.head_sha[:7]} (or it is a directory/binary)."
         all_lines = content.splitlines()
-        start = max(start_line, 1)
-        end = min(end_line or start + MAX_FILE_LINES - 1, start + MAX_FILE_LINES - 1, len(all_lines))
+        start, chunk = max(start_line, 1), SETTINGS.max_file_lines
+        end = min(end_line or start + chunk - 1, start + chunk - 1, len(all_lines))
         body = "\n".join(f"{n:>6}  {all_lines[n - 1]}" for n in range(start, end + 1))
         return f"{path} lines {start}-{end} of {len(all_lines)}\n{body}"
 
@@ -120,6 +120,7 @@ def run_review(gh: GitHubClient, pr_number: int) -> tuple[PullRequest, Review]:
         model=load_model(),
         system_prompt=SYSTEM_PROMPT,
         tools=build_tools(gh, pr, review),
+        retry_strategy=load_retry_strategy(),
         callback_handler=None,
     )
     agent(review_prompt(pr.repo, pr.number))

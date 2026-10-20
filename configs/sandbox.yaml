@@ -1,0 +1,28 @@
+# Deploy: AWS_PROFILE=<your-profile> scripts/deploy.sh sandbox
+# Parameters map to infra/agent.yaml. Strings support environment variables ($VAR / ${VAR}).
+StackName: pr-reviewer
+Region: us-east-1
+Parameters:
+  RuntimeName: pr_reviewer
+  # Session lifecycle (seconds)
+  IdleSessionTimeout: 900
+  MaxSessionLifetime: 3600
+  # Model
+  ModelId: us.anthropic.claude-opus-5-5
+  MaxTokens: 32000
+  ModelMaxAttempts: 6
+  ModelRetryInitialDelay: 4
+  ModelRetryMaxDelay: 240
+  BedrockClientMaxAttempts: 3
+  BedrockReadTimeout: 120
+  # GitHub
+  GitHubCredentialName: github
+  GitHubTimeout: 30
+  GitHubMaxRetries: 4
+  GitHubRetryBackoff: 1
+  # Review scope
+  MaxFileLines: 800
+  MaxDescriptionChars: 6000
+Tags:
+  Environment: sandbox
+  Project: pr-reviewer

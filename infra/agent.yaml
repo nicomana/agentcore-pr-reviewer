@@ -12,14 +12,77 @@ Parameters:
     Type: String
     Default: pr_reviewer
     AllowedPattern: "^[a-zA-Z][a-zA-Z0-9_]{0,47}$"
+  # Session lifecycle. Each review uses a fresh session, so these only bound idle/stuck sessions.
+  IdleSessionTimeout:
+    Type: Number
+    Default: 900
+    MinValue: 60
+    MaxValue: 28800
+    Description: Seconds an idle runtime session is kept before it is terminated.
+  MaxSessionLifetime:
+    Type: Number
+    Default: 3600
+    MinValue: 60
+    MaxValue: 28800
+    Description: Hard limit in seconds on a runtime session, idle or not.
+
+  # Model
   ModelId:
     Type: String
     Default: us.anthropic.claude-opus-5-5
     Description: Bedrock model or inference profile ID.
+  MaxTokens:
+    Type: Number
+    Default: 32000
+    Description: Max output tokens per model response.
+  ModelMaxAttempts:
+    Type: Number
+    Default: 6
+    Description: Agent-level attempts per model call when Bedrock throttles.
+  ModelRetryInitialDelay:
+    Type: Number
+    Default: 4
+    Description: Seconds before the first agent-level retry; doubles each time.
+  ModelRetryMaxDelay:
+    Type: Number
+    Default: 240
+    Description: Cap in seconds on the agent-level retry delay.
+  BedrockClientMaxAttempts:
+    Type: Number
+    Default: 3
+    Description: Bedrock client (botocore) attempts per request, standard retry mode.
+  BedrockReadTimeout:
+    Type: Number
+    Default: 120
+    Description: Seconds to wait for data on a Bedrock streaming response.
+
+  # GitHub
   GitHubCredentialName:
     Type: String
     Default: github
     Description: AgentCore Identity API key credential provider name for the GitHub token.
+  GitHubTimeout:
+    Type: Number
+    Default: 30
+    Description: Seconds per GitHub API request.
+  GitHubMaxRetries:
+    Type: Number
+    Default: 4
+    Description: Retries for transient GitHub failures (network, 429, rate limits, 5xx on reads).
+  GitHubRetryBackoff:
+    Type: Number
+    Default: 1
+    Description: Seconds before the first GitHub retry; doubles each time (Retry-After wins).
+
+  # Review scope
+  MaxFileLines:
+    Type: Number
+    Default: 800
+    Description: Max lines returned by one read_file call.
+  MaxDescriptionChars:
+    Type: Number
+    Default: 6000
+    Description: PR description is truncated to this many characters.
 
 Resources:
   # Set the real token after the first deploy:
@@ -106,6 +169,9 @@ Resources:
       RoleArn: !GetAtt ExecutionRole.Arn
       NetworkConfiguration:
         NetworkMode: PUBLIC
+      LifecycleConfiguration:
+        IdleRuntimeSessionTimeout: !Ref IdleSessionTimeout
+        MaxLifetime: !Ref MaxSessionLifetime
       AgentRuntimeArtifact:
         CodeConfiguration:
           Runtime: PYTHON_3_14
@@ -114,9 +180,21 @@ Resources:
             S3:
               Bucket: !Ref CodeBucket
               Prefix: !Ref CodeKey
+      # Read by app/reviewer/settings.py
       EnvironmentVariables:
         MODEL_ID: !Ref ModelId
+        MAX_TOKENS: !Ref MaxTokens
+        MODEL_MAX_ATTEMPTS: !Ref ModelMaxAttempts
+        MODEL_RETRY_INITIAL_DELAY: !Ref ModelRetryInitialDelay
+        MODEL_RETRY_MAX_DELAY: !Ref ModelRetryMaxDelay
+        BEDROCK_CLIENT_MAX_ATTEMPTS: !Ref BedrockClientMaxAttempts
+        BEDROCK_READ_TIMEOUT: !Ref BedrockReadTimeout
         GITHUB_CREDENTIAL_NAME: !Ref GitHubCredentialName
+        GITHUB_TIMEOUT: !Ref GitHubTimeout
+        GITHUB_MAX_RETRIES: !Ref GitHubMaxRetries
+        GITHUB_RETRY_BACKOFF: !Ref GitHubRetryBackoff
+        MAX_FILE_LINES: !Ref MaxFileLines
+        MAX_DESCRIPTION_CHARS: !Ref MaxDescriptionChars
 
 Outputs:
   RuntimeArn:

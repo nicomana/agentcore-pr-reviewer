@@ -6,6 +6,7 @@ from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from credentials import get_github_token
 from github_client import GitHubClient
 from reviewer import post_review, run_review
+from settings import SETTINGS
 
 app = BedrockAgentCoreApp()
 log = app.logger
@@ -28,7 +29,13 @@ def _parse_payload(payload) -> tuple[str, int, bool]:
 
 
 def review_pr(repo: str, number: int, dry_run: bool) -> dict:
-    gh = GitHubClient(get_github_token(), repo)
+    gh = GitHubClient(
+        get_github_token(),
+        repo,
+        timeout=SETTINGS.github_timeout,
+        max_retries=SETTINGS.github_max_retries,
+        retry_backoff=SETTINGS.github_retry_backoff,
+    )
     pr, review = run_review(gh, number)
     result = {
         "repo": repo,

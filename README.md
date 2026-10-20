@@ -14,9 +14,11 @@ An agent on Amazon Bedrock AgentCore Runtime that peer-reviews GitHub pull reque
 | `app/reviewer/main.py` | AgentCore entrypoint. Payload `{"repo": "owner/name", "pr_number": 1, "dry_run": false}` |
 | `app/reviewer/reviewer.py` | Agent tools (overview, diff, read file, list dir, submit review) and posting |
 | `app/reviewer/prompts.py` | Review system prompt (the main knob for review quality) |
+| `app/reviewer/settings.py` | Runtime settings read from environment variables, with local defaults |
 | `app/reviewer/cli.py` | Run a review locally without AgentCore |
+| `configs/<env>.yaml` | Per-environment stack parameters (timeouts, retries, model, limits) and tags |
 | `infra/agent.yaml` | CloudFormation: runtime, execution role, GitHub token secret, Identity credential provider |
-| `scripts/deploy.sh` | Builds the arm64 code zip, uploads it to S3, deploys `infra/agent.yaml` |
+| `scripts/deploy.sh` | Builds the arm64 code zip, uploads it to S3, deploys `infra/agent.yaml` with a config |
 | `infra/github-invoker-role.yaml` | IAM role and OIDC provider the workflow assumes |
 | `.github/workflows/pr-review.yml` | Workflow to copy into the repos to review |
 
@@ -97,7 +99,7 @@ The GitHub side is set up once per org from `infra/github-invoker-role.yaml`: th
 
 ## Prerequisites
 
-- `uv`, AWS CLI v2, `gh`, `zip`
+- `uv`, AWS CLI v2, `gh`, `zip`, [`yq`](https://github.com/mikefarah/yq) v4
 - Bedrock access to Claude Opus 5.5 in `us-east-1`
 - A fine-grained GitHub PAT with **Pull requests: read/write** and **Contents: read** on the target repos
 
@@ -116,8 +118,35 @@ AWS_REGION=us-east-1 uv run python cli.py owner/repo 123 --post   # posts to Git
 ## Deploy
 
 ```bash
-AWS_PROFILE=<your-profile> scripts/deploy.sh   # stack "pr-reviewer"; STACK_NAME / AWS_REGION to override
+AWS_PROFILE=<your-profile> scripts/deploy.sh sandbox            # deploys with configs/sandbox.yaml
+DRY_RUN=1 AWS_PROFILE=<your-profile> scripts/deploy.sh sandbox  # creates the change set only
 ```
+
+### Configuration
+
+Each environment has a file in [`configs/`](./configs). Its `Parameters` become stack parameters and its `Tags` become stack tags. `StackName`, `Region` and `ArtifactBucket` are optional top-level keys. Strings can use environment variables, e.g. `Branch: $BRANCH_NAME`. To add an environment, copy `configs/sandbox.yaml`.
+
+| Parameter | Default | What it controls |
+| --- | --- | --- |
+| `IdleSessionTimeout` | 900 | Seconds an idle runtime session is kept |
+| `MaxSessionLifetime` | 3600 | Hard limit in seconds on any runtime session |
+| `ModelId` | `us.anthropic.claude-opus-5-5` | Bedrock model or inference profile |
+| `MaxTokens` | 32000 | Max output tokens per model response |
+| `ModelMaxAttempts` | 6 | Agent-level attempts per model call when Bedrock throttles |
+| `ModelRetryInitialDelay` / `ModelRetryMaxDelay` | 4 / 240 | Backoff for those attempts, in seconds (doubles each time) |
+| `BedrockClientMaxAttempts` | 3 | Bedrock client attempts per request (botocore standard mode) |
+| `BedrockReadTimeout` | 120 | Seconds to wait for data on a Bedrock stream |
+| `GitHubTimeout` | 30 | Seconds per GitHub API request |
+| `GitHubMaxRetries` | 4 | Retries for network errors, 429s, rate limits and 5xx on reads |
+| `GitHubRetryBackoff` | 1 | First GitHub retry delay in seconds; doubles each time, and `Retry-After` wins |
+| `MaxFileLines` | 800 | Max lines one `read_file` call returns |
+| `MaxDescriptionChars` | 6000 | PR description is truncated to this length |
+
+The template passes these to the runtime as environment variables, and [`settings.py`](./app/reviewer/settings.py) reads them. Local runs use the same defaults; override any of them with the environment variable of the same name in upper snake case, e.g. `GITHUB_MAX_RETRIES=0`.
+
+The review POST is retried only when GitHub certainly didn't create the review: connection failures and rate limiting. A 5xx or a timeout on the POST fails the review instead of risking a duplicate.
+
+There is no AgentCore Memory: each review starts fresh.
 
 The script creates the artifact bucket `pr-reviewer-artifacts-<account>-<region>` if it's missing. It builds the zip from `app/reviewer/uv.lock` using Linux arm64 wheels. The zip's S3 key is a hash of the dependencies and sources, so unchanged code doesn't update the runtime.
 
